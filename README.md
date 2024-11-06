@@ -1,5 +1,6 @@
 # esp32draw
-Draw pictures on LED matrix screen witch powered by ESP32 dev board.  
+Draw pictures on LED matrix screen witch powered by ESP32 dev board.    
+[video/视频](https://www.bilibili.com/video/BV11dDhYYE7R/?share_source=copy_web&vd_source=f583ca7a19bb7e4e6e4741ada5944f88)  
 
 ![](./images/snapshot1.png)  
 ![](./images/snapshot2.png)
