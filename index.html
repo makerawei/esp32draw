@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link href="https://fonts.googleapis.com/css?family=Press+Start+2P" rel="stylesheet">
+    <link href="https://unpkg.com/nes.css/css/nes.css" rel="stylesheet" />
+    <title>esp32draw</title>
+    <style>
+      header {
+        margin-top: 20px;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        margin: 0;
+        min-height: 100vh;
+        background: linear-gradient(to bottom, #0d144a, #f2f2fa);
+        color: white;
+      }
+      .canvas {
+        text-align:center;
+        display: grid;
+        grid-template-columns: repeat(64, 10px);
+        grid-template-rows: repeat(64, 10px);
+      }
+      .grid-cell {
+        width: 10px;
+        height: 10px;
+        border: 1px solid black;
+        background-color: white;
+      }
+      .grid-cell:hover {
+        transform: scale(1.2);
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+      }
+      .controls {
+        margin-left: 10px;
+      }
+      .footer {
+        background-color: #f1f1f1;
+        text-align: center;
+        padding: 10px 0;
+        position: relative;
+        bottom: 0;
+        width: 100%;
+      }
+      .footer p {
+        margin: 0;
+        color: #333;
+      }
+    </style>
+</head>
+<body>
+  <header>
+    <nav>
+      <ul class="menu">
+        <li><a href="#manual">What's this</a></li>
+        <li><a href="#download">Download ESP32 firmware</a></li>
+        <li><a href="#contact">Contact with me</a></li>
+      </ul>
+    </nav>
+  </header>
+  <div style="flex: 1;">
+    <div style="margin-top: 5%;text-align: center;">
+      <section class="message-list">
+        <section class="message -left">
+          <i class="nes-icon github is-large"></i>
+          <div class="nes-balloon from-left">
+            <p style="color: #0d144a;">LED-Matrix monitor</p>
+          </div>
+        </section>
+      </section>
+    </div>
+    <div class="nes-container is-rounded">
+      <div style="display: flex">
+        <div class="canvas"></div>
+        <div class="controls">
+          <input type="file" id="imageInput" accept="image/*"><br/><hr/>
+          <input type="color" id="colorPicker" name="colorPicker" value="#239b56">
+          <p>Selected Color: <span id="selectedColor">#239b56</span></p>
+          <span>X-offset：</span><input id="xOffsetInput" value="32" placeholder="偏移行"></input><br/><br/>
+          <span>Y-offset：</span><input id="yOffsetInput" value="32" placeholder="偏移列"></input><br/><br/>
+          <span>XY-Scale：</span><input id="scaleInput"   value="1" placeholder="放大倍数(只能是整数倍)"></input><br/>
+          <br/>
+          <textarea id="posInput" rows="6" cols="40" placeholder="输入坐标点，如有多个坐标请换行。示例：10, 20"></textarea><br/><br/>
+          <div>
+            <label>
+              <input type="checkbox" class="nes-checkbox" checked id="clearCheckbox" />
+              <span>Clear before draw</span>
+            </label>
+          </div>
+          <div style="margin-top: 20px; text-align:left">
+            <button id="commitButton" class="nes-btn is-warning">Draw🎨</button>
+            <button id="rotateButton" class="nes-btn is-warning">Rotate</button>
+            <button id="clearButton" class="nes-btn is-warning">Clear</button>
+          </div>
+          <div style="margin-top: 10px">
+            <button id="connect"  class="nes-btn is-primary">Connect to serial port</button>
+            <button id="send" class="nes-btn is-success">Send to device</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <footer class="footer">
+      <p>&copy; 2024 <a href="https://b23.tv/uysJOjk" target="_blank">创客阿玮（B站、抖音同号）</a>. All rights reserved.</p>
+  </footer>
+  <script>
+    const colorPicker = document.getElementById("colorPicker");
+    const imageInput = document.getElementById("imageInput");
+    const xOffsetInput = document.getElementById("xOffsetInput");
+    const yOffsetInput = document.getElementById("yOffsetInput");
+    const scaleInput = document.getElementById("scaleInput");
+    const posInput = document.getElementById("posInput");
+    const commitButton = document.getElementById("commitButton");
+    const rotateButton = document.getElementById("rotateButton");
+    const clearButton = document.getElementById("clearButton");
+    const clearCheckbox = document.getElementById("clearCheckbox");
+    const canvas = document.querySelector(".canvas");
+    const clearColor = "";
+    const width = 64;
+    const height = 64;
+    
+    let comPort = null;
+    let markColor = "#239b56";
+    let offsetX = 0, offsetY = 0;
+    let newWidth, newHeight, imageBuffer;
+    let cells = new Array(width);
+    let globalPosList = [];
+    let isMouseDown = false;
+    
+    
+    function getUpdateImageBuffer() {
+      let buffer = new Uint8Array(11 + imageBuffer.length);
+      buffer[0] = 0xCC;
+      buffer[1] = 0x00;
+      buffer[2] = 0x00;
+      let bodySize = imageBuffer.length + 4 + 1;
+      buffer[3] = bodySize & 0xFF;
+      buffer[4] = (bodySize >> 8) & 0xFF;
+      buffer[5] = 0x00;
+      buffer[6] = newWidth & 0xFF;
+      buffer[7] = newHeight & 0xFF;
+      buffer[8] = offsetX & 0xFF;
+      buffer[9] = offsetY & 0xFF;
+      for(let i = 0; i < imageBuffer.length; i++) {
+        buffer[10 + i] = imageBuffer[i];
+      }
+      return buffer;
+    }
+    
+    function getDrawPixelBuffer() {
+      let pixels = [];
+      for(let x = 0; x < width; x++) {
+        for(let y = 0; y < height; y++) {
+          let rgbString = cells[x][y].style.backgroundColor;
+          if(rgbString) {
+            const result = rgbString.match(/^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/);
+            const r = parseInt(result[1], 10);
+            const g = parseInt(result[2], 10);
+            const b = parseInt(result[3], 10);
+            const color565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+            pixels.push({"x": x, "y": y, "color565": color565});
+          }
+        }
+      }
+      
+      if(pixels.length < 1) {
+        return;
+      }
+      
+      const totalSize = 9 + pixels.length * 4;
+      console.log("totalSize=", totalSize);
+      let buffer = new Uint8Array(totalSize);
+      buffer[0] = 0xCC;
+      buffer[1] = 0x00;
+      buffer[2] = 0x00;
+      let bodySize = pixels.length * 4 + 3;
+      console.log("bodySize=", bodySize);
+      buffer[3] = bodySize & 0xFF;
+      buffer[4] = (bodySize >> 8) & 0xFF;
+      buffer[5] = 0x01;  // cmd
+      buffer[6] = pixels.length & 0xFF;
+      buffer[7] = (pixels.length >> 8) & 0xFF;
+      let j = 0;
+      for(let i = 0; i < pixels.length; i++) {
+        buffer[ 8 + j] = pixels[i].y;
+        buffer[ 9 + j] = pixels[i].x;
+        buffer[10 + j] = pixels[i].color565 & 0xFF;
+        buffer[11 + j] = (pixels[i].color565 >> 8) & 0xFF;
+        j += 4;
+      }
+      
+      return buffer;
+    }
+    
+    function getClearBuffer() {
+      const totalSize = 7;
+      let buffer = new Uint8Array(totalSize);
+      buffer[0] = 0xCC;
+      buffer[1] = 0x00;
+      buffer[2] = 0x00;
+      buffer[3] = 0x01;
+      buffer[4] = 0x00;
+      buffer[5] = 0x02; // cmd
+      buffer[6] = 0x00;
+      
+      return buffer;
+    }
+    
+    async function serialSend(buffer) {
+      if(!comPort) {
+        return;
+      }
+      if(!buffer) {
+        return;
+      }
+      const writer = comPort.writable.getWriter();
+      try {
+        await writer.write(buffer);
+      } catch (err) {
+        console.error("Error writing to port:", err);
+      } finally {
+        writer.releaseLock();
+      }
+    }
+    
+    function init() {
+      colorPicker.addEventListener("input", () => {
+        colorPicker.textContent = colorPicker.value;
+        markColor = colorPicker.value;
+      });
+      
+      document.getElementById("connect").addEventListener("click", async () => {
+        try {
+          comPort = await navigator.serial.requestPort();
+          await comPort.open({ baudRate: 115200 });
+          console.log("Port opened successfully");
+        } catch (err) {
+        
+        }
+      });
+      
+      document.getElementById("send").addEventListener("click", async () => {
+        let buffer = null;
+        if(imageBuffer) {
+          buffer = getUpdateImageBuffer();
+        } else {
+          buffer = getDrawPixelBuffer();
+        }
+        serialSend(buffer);
+      });
+      
+      rotateButton.addEventListener("click", () => {
+          rotate();
+          draw(globalPosList);
+        }
+      );
+      
+      clearButton.addEventListener("click", () => {clear()});
+      commitButton.addEventListener("click", () => {
+        globalPosList = parsePosList()
+        draw(globalPosList);
+      });
+      imageInput.addEventListener("change", function(event) {
+        const file = event.target.files[0];
+        if (file) {
+          clear();
+          offsetX = 0;
+          offsetY = 0;
+          const reader = new FileReader();
+          reader.onload = function(e) {
+            const img = new Image();
+            img.onload = function() {
+              const canvas = document.createElement("canvas");
+              if (img.width > img.height) {
+                newWidth = width;
+                newHeight = Math.round((img.height / img.width) * width);
+                offsetY = ~~((height - newHeight) / 2);
+              } else {
+                newHeight = height;
+                newWidth = Math.round((img.width / img.height) * height);
+                offsetX = ~~((width - newWidth) / 2);
+              }
+              canvas.width = newWidth;
+              canvas.height = newHeight;
+              const ctx = canvas.getContext("2d");
+              ctx.drawImage(img, 0, 0, newWidth, newHeight);
+              const imageData = ctx.getImageData(0, 0, newWidth, newHeight);
+              const pixels = imageData.data;
+              imageBuffer = new Uint8Array(newWidth * newHeight * 2);
+              let j = 0;
+              for (let i = 0; i < newWidth * newHeight; i++) {
+                const r = pixels[i * 4];
+                const g = pixels[i * 4 + 1];
+                const b = pixels[i * 4 + 2];
+                
+                const color565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+                imageBuffer[j] = color565 & 0xFF;
+                imageBuffer[j + 1] = (color565 >> 8) & 0xFF;
+                j += 2;
+                const r5 = (color565 >> 11) & 0x1F;
+                const g6 = (color565 >> 5) & 0x3F;
+                const b5 = color565 & 0x1F;
+                const r8 = (r5 * 255) / 31;
+                const g8 = (g6 * 255) / 63;
+                const b8 = (b5 * 255) / 31;
+                const hexColor = `rgb(${Math.round(r8)}, ${Math.round(g8)}, ${Math.round(b8)})`;
+                
+                const x = ~~(i / newWidth) + offsetY;
+                const y = i % newWidth + offsetX;
+                cells[x][y].style.backgroundColor = hexColor;
+              }
+            };
+            img.src = e.target.result;
+          };
+          reader.readAsDataURL(file);
+        }
+      });
+      for (let i = 0; i < width; i++) {
+        cells[i] = new Array(height);
+        for(let j = 0; j < height; j++) {
+          const cell = document.createElement("div");
+          cell.classList.add("grid-cell");
+          canvas.addEventListener("contextmenu", (e) => {
+            e.preventDefault();
+          });
+          cell.addEventListener("mousedown", (e) => {
+            isMouseDown = true;
+            cell.style.backgroundColor = cell.style.backgroundColor ? clearColor : markColor;
+          });
+          cell.addEventListener("mousemove", (e) => {
+            if(isMouseDown) {
+              cell.style.backgroundColor = markColor;
+            }
+          });
+          cell.addEventListener("mouseup", (e)=>{
+            isMouseDown = false;
+          });
+
+          canvas.appendChild(cell);
+          cells[i][j] = cell;
+        }
+      }
+    }
+    
+    function expand(posList, n) {
+      if(n < 1) {
+        return posList;
+      }
+      const expandedPosList = [];
+      for (const [x, y] of posList) {
+        for (let dx = 0; dx < n; dx++) {
+          for (let dy = 0; dy < n; dy++) {
+            expandedPosList.push([n * x + dx, n * y + dy]);
+          }
+        }
+      }
+      let text = "";
+      expandedPosList.forEach((pos) => {text += pos[1] + ",\t" + pos[0] + "\n"});
+      console.log("Expanded positions")
+      console.log(text);
+      return expandedPosList;
+    }
+    
+    function clear() {
+      imageBuffer = null;
+      serialSend(getClearBuffer());
+      for(let i = 0; i < width; i++) {
+        for(let j = 0; j < height; j++) {
+          cells[i][j].style.backgroundColor = clearColor;
+        }
+      }
+    }
+    
+    function rotate() {
+      console.log("rotate");
+      for(let i = 0; i < globalPosList.length; i++) {
+        const x = globalPosList[i][0];
+        const y = globalPosList[i][1];
+        globalPosList[i][0] = y;
+        globalPosList[i][1] = -x;
+      }
+    }
+    
+    function draw(posList) {
+      if(clearCheckbox.checked) {
+        clear();
+      }
+      posList = expand(posList, parseScale())
+      posList.forEach(pos => {
+        const x = pos[0] + parseInt(xOffsetInput.value);
+        const y = pos[1] + parseInt(yOffsetInput.value);
+        if(x >= 0 && x < width && y >= 0 && y < height) {
+          cells[x][y].style.backgroundColor = markColor;
+        }
+      })
+      
+    } 
+    
+    function parseScale() {
+      const scale = parseInt(scaleInput.value);
+      if(scale < 0 || scale > 9) {
+        alert("Invalid scale, must in [1, 9]");
+        return -1;
+      }
+      return scale;
+    }
+    
+    function parsePosList() {
+      const indices = posInput.value.split("\n").map(pos => pos.trim());
+      let posList = [];
+      indices.forEach(pos => {
+        const tmp = pos.split(",");
+        if(tmp.length === 2) {
+          posList.push([parseInt(tmp[1]), parseInt(tmp[0])]);
+        }
+      });
+      return posList;
+    }
+    
+    init();
+
+  </script>
+</body>
+</html>
